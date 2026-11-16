@@ -149,6 +149,36 @@ function renderEnvelope(value) {
 }
 
 /**
+ * Render a batch as one line per entry: a gesture batch is run for its effects,
+ * so the per-entry data is noise unless an entry failed.
+ * @param value - parsed envelope from `batch`.
+ * @returns one text block.
+ */
+function renderBatch(value) {
+  if (value.ok === false) {
+    const error = value.error ?? {}
+    const lines = [`FAILED [${error.code ?? 'UNKNOWN'}] ${error.message ?? ''}`.trim()]
+    if (error.suggestion !== undefined) lines.push(`suggestion: ${error.suggestion}`)
+    if (error.details !== undefined) lines.push(`details: ${JSON.stringify(error.details).slice(0, 300)}`)
+    return [{ type: 'text', text: lines.join('\n') }]
+  }
+  const results = value.data?.results ?? []
+  const done = value.data?.completed_entries ?? results.length
+  const lines = [`${done}/${results.length} entries, ${value.data?.elapsed_ms ?? 0} ms`]
+  for (const [index, entry] of results.entries()) {
+    if (entry.ok === false) {
+      const error = entry.error ?? {}
+      lines.push(`${index + 1}. ${entry.command}: FAILED [${error.code ?? 'UNKNOWN'}] ${error.message ?? ''}`)
+      continue
+    }
+    const payload = entry.data === undefined ? '' : ` ${JSON.stringify(entry.data).slice(0, 160)}`
+    lines.push(`${index + 1}. ${entry.command}: ok${payload}`)
+  }
+  if (value.data?.not_started_entries) lines.push(`(${value.data.not_started_entries} entries never ran)`)
+  return [{ type: 'text', text: lines.join('\n') }]
+}
+
+/**
  * Render find results without the ancestor scaffolding: an unnamed group or
  * webarea that merely contains the match tells the model nothing.
  * @param value - parsed envelope from `find`.
@@ -211,6 +241,32 @@ export function apply(ctx, config) {
     output: { schema: ENVELOPE_SCHEMA, render: (_args, value) => renderEnvelope(value) },
     async execute(_args, exec) {
       return call(['status'], { signal: exec.signal })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'desktop_batch',
+    description: 'Run several CLI commands in one process, sequentially, stopping at the first failure. Use it to collapse a multi-step gesture — focus the window, open search, paste, confirm — into one call instead of one round trip per step. Entry args use the same names as the CLI options in snake_case; the CLI names the accepted fields when it refuses one.',
+    parameters: {
+      commands: {
+        type: 'array',
+        required: true,
+        description: 'Entries of {command, args}, for example {command: "press", args: {combo: "ctrl+v"}}.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            command: { type: 'string', required: true, description: 'CLI command name such as press, focus-window or clipboard-set.' },
+            args: { type: 'json', description: 'Command arguments, keyed like the CLI options.' },
+          },
+        },
+      },
+      timeout_ms: { type: 'integer', default: 60000, description: 'Wall-clock budget for the whole batch.' },
+    },
+    output: { schema: ENVELOPE_SCHEMA, render: (_args, value) => renderBatch(value) },
+    async execute(args, exec) {
+      const argv = ['batch', JSON.stringify(args.commands), '--stop-on-error', '--timeout-ms', String(args.timeout_ms ?? 60000)]
+      return call(argv, { signal: exec.signal })
     },
   }))
 
@@ -305,12 +361,13 @@ export function apply(ctx, config) {
 
   registerRefAction(ctx, settings, {
     name: 'desktop_type',
-    description: 'Insert text into an editable element by ref. Text travels over stdin, never through process arguments. The element must be a text field or editable text role; a terminal text node needs headed input.',
+    description: 'Insert text into an editable element by ref. Text travels over stdin, never through process arguments. The element must be a text field or editable text role; a terminal text node and a browser omnibox need headed input. Headed typing goes through the system input method, so an active IME can rewrite punctuation — prefer desktop_clipboard_set plus desktop_press ctrl+v for URLs and code.',
     parameters: {
       ref: { type: 'string', required: true, description: 'Qualified ref of the editable element.' },
       text: { type: 'string', required: true, description: 'Text to insert.' },
+      headed: { type: 'boolean', description: 'Allow physical key input when the element exposes no editable semantic action.' },
     },
-    build: args => ['type', args.ref, '--stdin'],
+    build: args => (args.headed === true ? ['--headed', 'type', args.ref, '--stdin'] : ['type', args.ref, '--stdin']),
     input: args => args.text,
   })
 

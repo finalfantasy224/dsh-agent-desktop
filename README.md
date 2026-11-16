@@ -20,6 +20,7 @@ agent-desktop status    # 看 platform、permissions 和 supported_surfaces
 | 工具 | 作用 |
 |---|---|
 | `desktop_status` | 平台、无障碍授权状态、本机支持的 surface 列表；换机器先跑这个 |
+| `desktop_batch` | 一次进程顺序跑多条命令，把多步手势压成一次调用 |
 | `desktop_list_windows` | 列出可见窗口（应用名、标题、窗口 id、bounds） |
 | `desktop_snapshot` | 读一个窗口的无障碍树，返回带 ref 的 JSON；`surface` 参数可读弹层 |
 | `desktop_find` | 按 role/name/text/value/description 定位元素，不必拉整棵树 |
@@ -41,6 +42,8 @@ agent-desktop status    # 看 platform、permissions 和 supported_surfaces
 `desktop_find` 的渲染会滤掉匿名祖先节点，只留具名节点和控件角色，并标出可点数量。
 
 contenteditable 编辑器（飞书、微信、Slack 等 Electron 应用）`desktop_type` 打不进去，标准解法是 `desktop_clipboard_set` + `desktop_press ctrl+v`：剪贴板粘贴不受 role 检查限制，也不受输入法组字状态影响。
+
+`desktop_batch` 是延迟优化手段：一次进程跑完整段手势，省掉每次调用的进程启动和模型往返。它**不等待界面响应**，所以连续按键之间要插 `{command:"wait", args:{ms:500}}`——飞书上省掉等待时，回车会在搜索结果渲染前就发出去，弹层不会关。entry 的参数名和 CLI 选项同名（`combo` 而不是 `keys`），传错时 CLI 会列出可用字段。
 
 所有工具返回 CLI 原始 JSON 信封：
 
@@ -96,8 +99,11 @@ contenteditable 编辑器（飞书、微信、Slack 等 Electron 应用）`deskt
 - **Wayland 会话**：窗口移动/缩放、指针手势、截图、剪贴板都不可用；只剩读树、语义点击、键盘。需要完整能力请用 Xorg 会话。
 - **菜单项点击有竞态**：菜单能打开也能读，但点击时 popover 可能已关闭（`ELEMENT_NOT_FOUND`）。优先用应用内快捷键。
 - **Electron/Chromium 应用**：树很深，`find` 默认 5 s 预算常超时，插件已把 `timeout_ms` 默认调到 15 s；Chrome 需要 `--force-renderer-accessibility` 启动。
+- **Chrome 地址栏要 `--headed`**：omnibox 是真正的 `textfield`，但没有可用的语义编辑动作，headless `type` 回 `POLICY_DENIED`（`supported_action` 检查失败）。加 `headed: true` 才进得去。headed 走系统输入法，中文输入法激活时 `.` 会变成 `。`——URL 和代码一律用剪贴板粘贴。
+- **浏览器会多出窗口**：页面能带出额外的 Chrome 窗口（必应实测 4 个），`find --app chrome` 直接 `AMBIGUOUS_TARGET`，必须传 `window_id`。
 - **Electron 应用可能整棵树不可用**：飞书（Feishu）没有 `textbox` 角色、会话行零个具名节点；搜索弹层要 `surface: sheet` 才读得到，消息气泡只以 `statictext` 形式露出（够做验证，不够做导航）。
 - **contenteditable 输入框打不进去**：`desktop_type` 对飞书的搜索框和消息框都返回 `ACTION_NOT_SUPPORTED: role group is not editable`，加 `--headed` 也一样。用 `desktop_clipboard_set` + `desktop_press ctrl+v` 绕过。
+- **行内链接点不动**：段落里的 `<a>` 与文本节点重叠，headed 点击回 `ACTION_FAILED`（`hit_test_unproven` / `sibling_overlap`），语义点击返回 `delivered_unverified` 但页面不动。块级链接（导航、结果标题）正常。
 - **剪贴板会覆盖用户内容**：`desktop_clipboard_set` 是全局副作用，写完最好把原内容读回来还原。
 - **全屏截图**在 GNOME 合成窗口管理器下不可用，只能按窗口截（本插件未暴露截图工具）。
 - 快照会落盘在 `~/.agent-desktop/snapshots`，包含界面文案，注意隐私。
