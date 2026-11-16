@@ -7,16 +7,19 @@ agent-desktop 读取操作系统的无障碍树（Linux 上是 AT-SPI），返�
 ## 依赖
 
 - `agent-desktop` 可执行文件在 PATH 上：`npm install -g agent-desktop`
-- 一个真实的桌面会话（X11 或 Wayland，需有 AT-SPI 总线）
+- 一个真实的桌面会话：macOS 13+、Windows 10 1809+ 或 Linux 24.04+（X11 或 Wayland，需有 AT-SPI 总线）
 
 ```bash
-agent-desktop status    # accessibility: granted，supported_surfaces 非空
+agent-desktop status    # 看 platform、permissions 和 supported_surfaces
 ```
+
+`supported_surfaces` 为空表示无障碍总线没应答，不是桌面空。macOS 首次使用要走 `agent-desktop permissions --guide` 授予辅助功能权限。
 
 ## 工具
 
 | 工具 | 作用 |
 |---|---|
+| `desktop_status` | 平台、无障碍授权状态、本机支持的 surface 列表；换机器先跑这个 |
 | `desktop_list_windows` | 列出可见窗口（应用名、标题、窗口 id、bounds） |
 | `desktop_snapshot` | 读一个窗口的无障碍树，返回带 ref 的 JSON；`surface` 参数可读弹层 |
 | `desktop_find` | 按 role/name/text/value/description 定位元素，不必拉整棵树 |
@@ -31,7 +34,7 @@ agent-desktop status    # accessibility: granted，supported_surfaces 非空
 | `desktop_clipboard_set` | 写剪贴板（走 stdin，不进进程参数，上限 128 KiB） |
 | `desktop_clipboard_get` | 读剪贴板（text / auto / image / file-urls） |
 
-`surface` 在 Linux（AT-SPI）后端支持 `window / sheet / alert / menu / system-tray` 五种，其余值会返回 `INVALID_ARGS`。对话框、菜单、搜索弹层都不在窗口树里，必须用 surface 读。
+`surface` 的取值由平台决定：Linux（AT-SPI）是 `window / sheet / alert / menu / system-tray`，macOS 另有 `popover`、`menubar`，Windows 另有 `start-menu`、`action-center`。参数不做枚举校验，传错时 CLI 回 `INVALID_ARGS`，`details.supported_surfaces` 直接列出本机可用值；`desktop_status` 也能提前查到。对话框、菜单、搜索弹层都不在窗口树里，必须用 surface 读。
 
 `desktop_snapshot` 的 `timeout_ms`（默认 10000）是观察截止时间。给太短会读到"未经证明唯一"的 ref，后续 `desktop_click` / `desktop_type` 直接回 `AMBIGUOUS_TARGET`——飞书的搜索框就是这个坑，3000 ms 必踩。
 
@@ -59,6 +62,8 @@ contenteditable 编辑器（飞书、微信、Slack 等 Electron 应用）`deskt
         timeoutMs: 30000         # 单次调用上限
 ```
 
+`command` 在 Windows 上注意：npm 全局安装生成的是 `agent-desktop.cmd`，插件对以 `.cmd` / `.bat` 结尾的路径自动加 `shell: true` 并按 Windows 规则加引号；指到 `.exe` 全路径则走直接 spawn。
+
 ## 使用纪律
 
 1. **ref 只属于产生它的快照**。界面变了要重新 `desktop_snapshot`，否则 `STALE_REF`。
@@ -68,6 +73,23 @@ contenteditable 编辑器（飞书、微信、Slack 等 Electron 应用）`deskt
 5. **动作后验证**：语义点击不保证应用真的响应。
 6. **物理输入前先 `desktop_focus`**：`press`、`mouse`、指针动作都落在焦点窗口上。
 7. **坐标点击是最后手段**：优先 `desktop_click`；`desktop_mouse` 的坐标来自元素 bounds、截图或用户，工具本身不识别任何东西。
+
+## 平台差异
+
+底层 CLI 三平台同源，命令名、ref 格式、JSON 信封、错误码完全一致，差异集中在无障碍 API 和权限模型上。
+
+| 平台 | 要求 | 无障碍 API | 首要注意事项 |
+|---|---|---|---|
+| macOS | 13+，Intel 或 Apple Silicon | AX API | 必须授予「辅助功能」权限；`desktop_status` 里 `permissions.accessibility.state` 不是 `granted` 时所有工具都会失败 |
+| Windows | 10 1809+，x64 或 ARM64 | UI Automation | npm 全局装的是 `.cmd` shim，`command` 指向 `.exe`，或让插件对 `.cmd` / `.bat` 走 shell |
+| Linux | 24.04+，X11 或 Wayland | AT-SPI | 需要会话内的 AT-SPI 总线；`focus-window` 和指针输入需要 X11 |
+
+两处容易误判的行为差异：
+
+- **`--headed` 的兜底顺序相反**：Linux 和 macOS 是物理输入优先、语义动作兜底，Windows 反过来。
+- **`menu` surface 含义不同**：macOS 读的是应用菜单栏，Windows 和 Linux 读的是应用内的弹出菜单。
+
+`desktop_mouse` 和 `desktop_press` 在所有平台都需要 `--headed`（插件已自动带上），但 macOS 还额外依赖辅助功能授权，Wayland 下指针类命令直接拒绝。
 
 ## 已知限制
 

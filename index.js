@@ -43,10 +43,21 @@ const SNAPSHOT_GUIDANCE = 'Refs are scoped to one snapshot: after the UI changes
 
 /**
  * Popup surfaces are not part of any window tree, so they need their own read.
- * The list is what the Linux AT-SPI backend reports as supported; the CLI's own
- * enum is wider but answers INVALID_ARGS for the rest.
+ * The accepted names are platform-owned — Linux (AT-SPI) answers window, sheet,
+ * alert, menu and system-tray, macOS adds popover and menubar, Windows adds
+ * start-menu and action-center — so the parameter stays free-form and the CLI
+ * names the values it accepts when it refuses one.
  */
-const SURFACES = ['window', 'sheet', 'alert', 'menu', 'system-tray']
+const SURFACE_HINT = 'Supported values differ per platform; desktop_status lists them (Linux: window, sheet, alert, menu, system-tray).'
+
+/**
+ * Quote one argument for the Windows shell, which npm's .cmd shim needs.
+ * @param value - one command or argument.
+ * @returns the argument, quoted when it contains whitespace or quotes.
+ */
+function quoteWin(value) {
+  return /[\s"]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value
+}
 
 /**
  * Run one CLI command and parse its single JSON envelope.
@@ -62,7 +73,11 @@ function runCli(settings, args, options = {}) {
       reject(new Error('agent-desktop call aborted before start'))
       return
     }
-    const child = spawn(settings.command, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    // npm installs a .cmd shim on Windows, which CreateProcess cannot start directly.
+    const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(settings.command)
+    const child = useShell
+      ? spawn([quoteWin(settings.command), ...args.map(quoteWin)].join(' '), { stdio: ['pipe', 'pipe', 'pipe'], shell: true })
+      : spawn(settings.command, args, { stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -122,6 +137,11 @@ function renderEnvelope(value) {
     const disposition = error.disposition
     if (disposition !== undefined) {
       lines.push(`delivery: ${disposition.delivery}, retry: ${disposition.retry}`)
+    }
+    // details carries the values that let the caller correct the request, such as
+    // the surfaces this platform accepts.
+    if (error.details !== undefined && error.details !== null && Object.keys(error.details).length > 0) {
+      lines.push(`details: ${JSON.stringify(error.details).slice(0, 400)}`)
     }
     return [{ type: 'text', text: lines.join('\n') }]
   }
@@ -185,6 +205,16 @@ export function apply(ctx, config) {
   const call = (args, options) => runCli(settings, args, options)
 
   ctx.tools.register(defineTool({
+    name: 'desktop_status',
+    description: 'Report the platform, the accessibility permission state and the snapshot surfaces this build supports. Start here on an unfamiliar machine: a denied permission explains why every other tool fails, and an empty supported_surfaces list means the accessibility bus is not answering rather than an empty desktop.',
+    parameters: {},
+    output: { schema: ENVELOPE_SCHEMA, render: (_args, value) => renderEnvelope(value) },
+    async execute(_args, exec) {
+      return call(['status'], { signal: exec.signal })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'desktop_list_windows',
     description: 'List visible desktop windows with their app name, title, window id and bounds. Start here when you do not know the app name, and use the id with desktop_snapshot when an app has several windows.',
     parameters: {
@@ -204,7 +234,7 @@ export function apply(ctx, config) {
     parameters: {
       app: { type: 'string', description: 'Application name from desktop_list_windows.' },
       window_id: { type: 'string', description: 'Window id when the app has several windows.' },
-      surface: { type: 'string', enum: SURFACES, description: 'Read a popup surface instead of the window tree: sheet for a modal dialog, menu for an open menu, popover, alert.' },
+      surface: { type: 'string', description: `Read a popup surface instead of the window tree: sheet for a modal dialog, menu for an open menu, popover, alert. ${SURFACE_HINT}` },
       interactive_only: { type: 'boolean', default: true, description: 'Keep only elements the agent can act on. Defaults to true.' },
       compact: { type: 'boolean', default: true, description: 'Drop layout noise. Defaults to true.' },
       max_depth: { type: 'integer', description: 'Limit semantic depth for dense applications.' },
@@ -232,7 +262,7 @@ export function apply(ctx, config) {
     parameters: {
       app: { type: 'string', description: 'Application name to search.' },
       window_id: { type: 'string', description: 'Scope to a single window id.' },
-      surface: { type: 'string', enum: SURFACES, description: 'Search a popup surface instead of the window tree.' },
+      surface: { type: 'string', description: `Search a popup surface instead of the window tree. ${SURFACE_HINT}` },
       role: { type: 'string', description: 'Accessibility role such as button, textfield, checkbox, group.' },
       name: { type: 'string', description: 'Accessible name or label.' },
       text: { type: 'string', description: 'Text in name, value, title or description.' },
